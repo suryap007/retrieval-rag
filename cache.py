@@ -36,17 +36,24 @@ def semantic_cache_match(question, cache, embeddings, threshold=0.88):
     """
     q_vec = embeddings.embed_query(question)
 
-    best, best_score = None, 0
-    for q, meta in cache.items():
-        score = cosine(q_vec, embeddings.embed_query(q))
+    best_item = None
+    best_score = 0
+
+    for cached_q, meta in cache.items():
+        score = cosine(q_vec, embeddings.embed_query(cached_q))
         if score > best_score:
-            best, best_score = meta, score
+            best_item = meta
+            best_score = score
 
-    return best if best_score >= threshold else None
+    return best_item if best_score >= threshold else None
 
 
-def update_cache(folder, question, source, cache):
+def update_cache(folder, question, source, cache, answer):
+    """
+    Store question -> answer mapping
+    """
     cache[question] = {
+        "answer": answer,
         "source": source,
         "hits": cache.get(question, {}).get("hits", 0) + 1
     }
