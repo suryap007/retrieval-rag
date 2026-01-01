@@ -1,24 +1,22 @@
 import os
+import shutil
 import streamlit as st
 
 from langchain_community.document_loaders import (
     PyPDFLoader,
     TextLoader,
-    UnstructuredWordDocumentLoader,
-    CSVLoader
+    CSVLoader,
+    UnstructuredWordDocumentLoader
 )
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_community.llms import Ollama
 
-# -----------------------------
-# YOUR EXISTING MODULES
-# -----------------------------
 from chunking import dynamic_chunk_documents
 from file_upload import file_upload_ui
 from classifier import classify_folder_dynamic
 from cache import load_cache, semantic_cache_match, update_cache
-
+from csv_ingest import csv_to_documents
 # -----------------------------
 # CONFIG
 # -----------------------------
@@ -47,12 +45,7 @@ def load_models():
         persist_directory=DB_DIR,
         embedding_function=embeddings
     )
-
-    llm = Ollama(
-        model="llama3.1",
-        temperature=0
-    )
-
+    llm = Ollama(model="mistral:7b", temperature=0)
     return embeddings, vectorstore, llm
 
 
@@ -60,60 +53,66 @@ embeddings, vectorstore, llm = load_models()
 collection = vectorstore._collection
 
 # -----------------------------
-# INGEST DOCUMENTS
+# INGEST DOCUMENTS (✅ FIXED)
 # -----------------------------
-def ingest_documents():
+def ingest_documents(_clear_cache=False):
     os.makedirs(DOC_PATH, exist_ok=True)
 
-    st.write("📂 Scanning folders in:", DOC_PATH)
-    folders = [
-        f for f in os.listdir(DOC_PATH)
-        if os.path.isdir(os.path.join(DOC_PATH, f))
-    ]
-    st.write(folders)
-
-    for folder in folders:
+    for folder in os.listdir(DOC_PATH):
         folder_path = os.path.join(DOC_PATH, folder)
+        if not os.path.isdir(folder_path):
+            continue
 
         for file in os.listdir(folder_path):
             file_path = os.path.join(folder_path, file)
             ext = os.path.splitext(file)[1].lower()
 
             try:
-                st.info(f"📄 Loading {file_path}")
+                # ================= CSV =================
+                if ext == ".csv":
+                    from csv_ingest import csv_to_documents
+                    docs = csv_to_documents(file_path, folder)
 
-                if ext == ".pdf":
+                # ================= PDF =================
+                elif ext == ".pdf":
                     loader = PyPDFLoader(file_path)
+                    docs = loader.load()
+
+                # ================= TXT =================
                 elif ext == ".txt":
                     loader = TextLoader(file_path)
-                elif ext == ".csv":
-                    loader = CSVLoader(file_path)
+                    docs = loader.load()
+
+                # ================= DOC / DOCX =================
                 elif ext in [".doc", ".docx"]:
                     loader = UnstructuredWordDocumentLoader(file_path)
+                    docs = loader.load()
+
                 else:
-                    st.warning(f"⚠️ Unsupported file type: {file}")
-                    continue
+                    continue  # unsupported file
 
-                docs = loader.load()
-                if not docs:
-                    continue
+                # ---------- CHUNKING ----------
+                if ext == ".csv":
+                    chunks = docs          # ❌ NO chunking for CSV
+                else:
+                    chunks = dynamic_chunk_documents(docs)
 
-                chunks = dynamic_chunk_documents(docs)
-
+                # ---------- METADATA ----------
                 for chunk in chunks:
                     chunk.metadata.update({
-                        "source": file_path,
-                        "category": folder
+                        "category": folder,
+                        "source": file_path
                     })
 
                 vectorstore.add_documents(chunks)
 
             except Exception as e:
-                st.error(f"❌ Failed {file}: {e}")
+                st.error(f"❌ Failed to ingest {file_path}: {e}")
 
     vectorstore.persist()
     st.session_state.ingestion_done = True
-    st.success("✅ All documents ingested into Chroma DB")
+    st.success("✅ Documents ingested successfully")
+
 
 # -----------------------------
 # FILE UPLOAD UI
@@ -129,28 +128,35 @@ if not st.session_state.ingestion_done:
 # -----------------------------
 # RAG RETRIEVAL
 # -----------------------------
-def rag_retrieve(question, metadata_filter):
-    retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 5, "filter": metadata_filter}
-    )
+def rag_retrieve(question, folder, attribute_filters=None):
+    search_kwargs = {
+        "k": 10,
+        "filter": {"category": folder}
+    }
 
+    # 🔥 Merge attribute filters
+    if attribute_filters:
+        search_kwargs["filter"].update(attribute_filters)
+
+    retriever = vectorstore.as_retriever(search_kwargs=search_kwargs)
     docs = retriever.invoke(question)
 
     if not docs:
         return None, None
 
     context = "\n\n".join(d.page_content for d in docs)
-    source = docs[0].metadata.get("source")
+    source = docs[0].metadata["source"]
     return context, source
 
+
 # -----------------------------
-# LLM ANSWER (NO SCHEMA)
+# LLM ANSWER
 # -----------------------------
 def generate_llm_answer(question, context):
     prompt = f"""
 You are a RAG assistant.
-Answer ONLY using the provided context.
-If the answer is not present in the context, say "I don't know".
+Answer ONLY using the context below.
+If the answer is not present, say "I don't know".
 
 Context:
 {context}
@@ -160,16 +166,41 @@ Question:
 
 Answer:
 """
+    return llm.invoke(prompt).strip()
+
+
+def extract_csv_filters(question, llm):
+    prompt = f"""
+Extract CSV filters from the question.
+Return JSON only.
+
+Example:
+Question: "employees in HR"
+Output: {{"department": "HR"}}
+
+Question: "salary of John"
+Output: {{"name": "John"}}
+
+Question:
+{question}
+
+Output:
+"""
     response = llm.invoke(prompt)
-    return response.strip()
+
+    try:
+        return eval(response.strip())
+    except:
+        return {}
+
 
 # -----------------------------
 # QUERY UI
 # -----------------------------
 if st.session_state.ingestion_done:
-    st.subheader("🔎 Query Documents")
+    st.subheader("🔎 Ask a Question")
 
-    question = st.text_input("Ask a question")
+    question = st.text_input("Your question")
 
     if question:
         folder = classify_folder_dynamic(
@@ -177,48 +208,27 @@ if st.session_state.ingestion_done:
         )
 
         if not folder:
-            st.warning("❌ No matching folder found")
+            st.warning("❌ No relevant folder found")
         else:
-            folder_cache = load_cache(folder)
-            cached = semantic_cache_match(
-                question, folder_cache, embeddings
-            )
+            cache = load_cache(folder)
+            cached = semantic_cache_match(question, cache, embeddings)
 
-            # -------- CACHE HIT --------
             if cached:
-                st.info("⚡ Cache Hit (LLM Answer)")
-                answer = cached.get("answer")
-                context = None
-
-            # -------- CACHE MISS --------
+                st.info("⚡ Cache Hit")
+                answer = cached["answer"]
+                source = cached["source"]
             else:
-                context, source = rag_retrieve(
-                    question, {"category": folder}
-                )
-
+                context, source = rag_retrieve(question, folder)
                 if context:
                     answer = generate_llm_answer(question, context)
-
-                    update_cache(
-                        folder=folder,
-                        question=question,
-                        source=source,
-                        cache=folder_cache,
-                        answer=answer
-                    )
-
-                    st.info("📚 RAG + Ollama LLM Answer")
+                    update_cache(folder, question, source, cache, answer)
                 else:
-                    st.warning("I don't know based on the documents.")
-                    answer = None
+                    answer = "I don't know"
+                    source = None
 
-            # -------- DISPLAY --------
-            if answer:
-                st.subheader("🧠 Answer")
-                st.write(answer)
+            st.subheader("🧠 Answer")
+            st.write(answer)
 
-                if context:
-                    with st.expander("🔍 Retrieved Context"):
-                        st.write(context)
-else:
-    st.info("Ingesting documents… please wait.")
+            if source:
+                st.subheader("📁 Source File")
+                st.code(source)
