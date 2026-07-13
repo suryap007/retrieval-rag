@@ -56,7 +56,7 @@ To improve performance, the system also includes:
 The system processes user queries through preprocessing, semantic classification, intelligent cache lookup, vector retrieval, and LLM-based answer generation.
 
 <p align="center">
-  <img src="assets/system_architecture.png" alt="Architecture" width="100%">
+   <img src="Rag-Architecture.png" alt="Extractive RAG System Architecture" width="100%">
 </p>
 
 ---
@@ -207,7 +207,7 @@ source venv/bin/activate
 ## Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -r packages.txt
 ```
 
 ---
