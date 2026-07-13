@@ -1,7 +1,7 @@
 # 📚 Extractive Retrieval-Augmented Generation (RAG)
 
 <p align="center">
-  <img src="assets/system_architecture.png" alt="Extractive RAG System Architecture" width="100%">
+  <img src="Rag-Architecture.png" alt="Extractive RAG System Architecture" width="100%">
 </p>
 
 <p align="center">
